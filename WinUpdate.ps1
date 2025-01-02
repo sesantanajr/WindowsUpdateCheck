@@ -2,120 +2,216 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Script abrangente para Windows Update incluindo todas as categorias de atualizações
+  Script abrangente para reparo e atualizacao do Windows,
+  compativel com Windows 10 e 11 (Home, Pro, Business, Enterprise).
+
 .DESCRIPTION
-    - Repara serviços do Windows Update
-    - Atualiza drivers
-    - Atualiza produtos Microsoft
-    - Instala atualizações opcionais
-    - Atualiza features do Windows
-    - Instala atualizações de segurança
+  1. Repara servicos do Windows Update (checando e habilitando).
+  2. Limpa cache e componentes corrompidos.
+  3. Instala modulos necessarios (NuGet, PSWindowsUpdate).
+  4. Aplica atualizacoes de seguranca, criticas, drivers, opcionais etc.
+  5. Gera logs detalhados, sem forcar reboot.
+
+.NOTES
+  Autor: Sergio
 #>
 
-# Configuração de logs
-$LogPath = "$env:TEMP\WindowsUpdate_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+# -- Configuracao de logs --------------------------------------
+
+$TimeStamp = (Get-Date -Format 'yyyyMMdd_HHmmss')
+$LogPath   = "$env:TEMP\WindowsUpdate_$TimeStamp.log"
 
 function Write-Log {
-    param($Message)
-    $TimeStamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $LogMessage = "$TimeStamp : $Message"
-    Add-Content -Path $LogPath -Value $LogMessage
-    Write-Host $LogMessage
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Message
+    )
+
+    $logEntry = "[{0:yyyy-MM-dd HH:mm:ss}] {1}" -f (Get-Date), $Message
+    Add-Content -Path $LogPath -Value $logEntry
+    Write-Host $logEntry
 }
 
-# Função para reparar Windows Update
+# -- Funcao para verificar e ativar servicos essenciais --------
+
+function Enable-RequiredServices {
+    Write-Log "Verificando e ativando servicos criticos de Windows Update..."
+
+    # Lista de servicos que podem impactar o Windows Update
+    $serviceList = @(
+        'wuauserv',  # Windows Update
+        'bits',      # Background Intelligent Transfer Service
+        'cryptsvc',  # Cryptographic Services
+        'msiserver'  # Windows Installer
+    )
+
+    foreach ($svc in $serviceList) {
+        try {
+            $service = Get-Service -Name $svc -ErrorAction Stop
+            
+            if ($service.StartType -eq 'Disabled') {
+                Write-Log ("Servico {0} esta 'Disabled'. Definindo para 'Manual'..." -f $svc)
+                Set-Service -Name $svc -StartupType Manual -ErrorAction Stop
+            }
+
+            if ($service.Status -ne 'Running') {
+                Write-Log ("Iniciando servico {0}..." -f $svc)
+                Start-Service -Name $svc -ErrorAction Stop
+            }
+            Write-Log ("Servico {0} OK" -f $svc)
+        }
+        catch {
+            Write-Log ("ERRO ao configurar servico {0}: {1}" -f $svc, $_.Exception.Message)
+        }
+    }
+}
+
+# -- Funcao para reparo do Windows Update ----------------------
+
 function Repair-WindowsUpdate {
-    Write-Log "Iniciando reparo do Windows Update..."
-    
-    # Parar serviços relacionados
+    Write-Log "===== Iniciando reparo do Windows Update ====="
+
+    # Passo 1: Verificar e habilitar servicos
+    Enable-RequiredServices
+
+    # Passo 2: Parar servicos de atualizacao
     $services = @('wuauserv', 'bits', 'cryptsvc', 'msiserver')
     foreach ($service in $services) {
-        Stop-Service -Name $service -Force
-        Write-Log "Serviço $service parado"
+        try {
+            $currentStatus = (Get-Service -Name $service -ErrorAction SilentlyContinue).Status
+            if ($currentStatus -eq 'Running') {
+                Stop-Service -Name $service -Force -ErrorAction Stop
+                Write-Log ("Servico {0} parado." -f $service)
+            }
+        }
+        catch {
+            Write-Log ("ERRO ao parar {0}: {1}" -f $service, $_.Exception.Message)
+        }
     }
 
-    # Limpar cache do Windows Update
-    Remove-Item "$env:SystemRoot\SoftwareDistribution\*" -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item "$env:SystemRoot\System32\catroot2\*" -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Log "Cache do Windows Update limpo"
+    # Passo 3: Limpar cache do Windows Update
+    Write-Log "Limpando cache do Windows Update..."
+    try {
+        Remove-Item "$env:SystemRoot\SoftwareDistribution\*" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item "$env:SystemRoot\System32\catroot2\*" -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Log "Cache do Windows Update limpo."
+    }
+    catch {
+        Write-Log ("ERRO ao limpar cache do Windows Update: {0}" -f $_.Exception.Message)
+    }
 
-    # Reparar componentes do sistema
-    Write-Log "Executando verificação do sistema..."
-    Start-Process "DISM.exe" -ArgumentList "/Online /Cleanup-Image /RestoreHealth" -Wait -NoNewWindow
-    Start-Process "sfc.exe" -ArgumentList "/scannow" -Wait -NoNewWindow
-    
-    # Reiniciar serviços
+    # Passo 4: Reparar componentes do sistema
+    Write-Log "Executando DISM e SFC..."
+    try {
+        Start-Process "DISM.exe" -ArgumentList "/Online /Cleanup-Image /RestoreHealth" -Wait -NoNewWindow -ErrorAction Stop
+        Start-Process "sfc.exe" -ArgumentList "/scannow" -Wait -NoNewWindow -ErrorAction Stop
+        Write-Log "DISM e SFC concluidos."
+    }
+    catch {
+        Write-Log ("ERRO ao executar DISM/SFC: {0}" -f $_.Exception.Message)
+    }
+
+    # Passo 5: Reiniciar servicos
     foreach ($service in $services) {
-        Start-Service -Name $service
-        Write-Log "Serviço $service reiniciado"
+        try {
+            Start-Service -Name $service -ErrorAction Stop
+            Write-Log ("Servico {0} reiniciado." -f $service)
+        }
+        catch {
+            Write-Log ("ERRO ao reiniciar {0}: {1}" -f $service, $_.Exception.Message)
+        }
     }
 
-    Write-Log "Reparo do Windows Update concluído"
+    Write-Log "===== Reparo do Windows Update concluido ====="
 }
 
+# -- Funcao para instalar atualizacoes via PSWindowsUpdate -----
+
+function Install-WindowsUpdates {
+    Write-Log "===== Iniciando instalacao de atualizacoes ====="
+
+    # Ajustar protocolo TLS
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+    # Ajustar politica de execucao (escopo de processo)
+    Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
+    Write-Log "Politica de execucao definida para Bypass (escopo de processo)."
+
+    # Instalar pacotes e modulos necessarios
+    Write-Log "Instalando modulos e providers (NuGet, PSWindowsUpdate)..."
+    try {
+        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -ErrorAction Stop | Out-Null
+        Set-PSRepository -Name "PSGallery" -InstallationPolicy Trusted -ErrorAction Stop
+        Install-Module PSWindowsUpdate -Force -AllowClobber -ErrorAction Stop | Out-Null
+        Import-Module PSWindowsUpdate -Force -ErrorAction Stop
+        Write-Log "Modulo PSWindowsUpdate instalado/importado com sucesso."
+    }
+    catch {
+        Write-Log ("ERRO ao instalar PSWindowsUpdate ou NuGet: {0}" -f $_.Exception.Message)
+        return
+    }
+
+    # Criterios de atualizacao
+    $updateCriteria = @{
+        AcceptAll   = $true
+        IgnoreReboot= $true
+        NotCategory = "Definition Updates"
+        Install     = $true
+    }
+
+    # Lista de categorias de atualizacao
+    $categories = @(
+        "Security Updates",
+        "Critical Updates",
+        "Feature Packs",
+        "Microsoft",
+        "Drivers",
+        "Optional Updates"
+    )
+
+    foreach ($cat in $categories) {
+        Write-Log ("Buscando atualizacoes da categoria: {0}" -f $cat)
+        try {
+            Get-WindowsUpdate -Category $cat @updateCriteria -ErrorAction Stop
+        }
+        catch {
+            Write-Log ("ERRO ao buscar/instalar updates na categoria {0}: {1}" -f $cat, $_.Exception.Message)
+        }
+    }
+
+    Write-Log "===== Instalacao de atualizacoes concluida ====="
+
+    # Verificar se ha reboot pendente (sem forcar)
+    try {
+        $rebootStatus = Get-WURebootStatus -Silent
+        if ($rebootStatus) {
+            Write-Log "AVISO: Ha uma reinicializacao pendente para concluir as atualizacoes. O usuario decide quando reiniciar."
+        }
+    }
+    catch {
+        Write-Log ("ERRO ao verificar status de reboot: {0}" -f $_.Exception.Message)
+    }
+}
+
+# -- Bloco principal (try/catch geral) --------------------------
+
 try {
-    Write-Log "=== Iniciando processo completo de atualização do Windows ==="
+    Write-Log "=== Iniciando processo completo de atualizacao do Windows ==="
 
     # 1. Reparar Windows Update
     Repair-WindowsUpdate
 
-    # 2. Configurar ambiente
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
-    
-    # 3. Instalar e configurar módulos necessários
-    Write-Log "Configurando módulos..."
-    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
-    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-    Install-Module PSWindowsUpdate -Force -AllowClobber | Out-Null
-    Import-Module PSWindowsUpdate -Force
+    # 2. Instalar atualizacoes (sem forcar reboot)
+    Install-WindowsUpdates
 
-    # 4. Configurar critérios de atualização
-    $updateCriteria = @{
-        AcceptAll = $true
-        IgnoreReboot = $true
-        NotCategory = "Definition Updates"  # Exclui atualizações de definição de antivírus
-        Install = $true
-    }
-
-    # 5. Instalar atualizações por categoria
-    Write-Log "Iniciando instalação de atualizações..."
-
-    # Atualizações de Segurança
-    Write-Log "Buscando atualizações de segurança..."
-    Get-WindowsUpdate -Category "Security Updates" @updateCriteria
-
-    # Atualizações Críticas
-    Write-Log "Buscando atualizações críticas..."
-    Get-WindowsUpdate -Category "Critical Updates" @updateCriteria
-
-    # Atualizações de Feature
-    Write-Log "Buscando atualizações de features..."
-    Get-WindowsUpdate -Category "Feature Packs" @updateCriteria
-
-    # Updates para Produtos Microsoft
-    Write-Log "Buscando atualizações de produtos Microsoft..."
-    Get-WindowsUpdate -Category "Microsoft" @updateCriteria
-
-    # Drivers
-    Write-Log "Buscando atualizações de drivers..."
-    Get-WindowsUpdate -Category "Drivers" @updateCriteria
-
-    # Atualizações Opcionais
-    Write-Log "Buscando atualizações opcionais..."
-    Get-WindowsUpdate -Category "Optional Updates" @updateCriteria
-
-    # 6. Verificar status final
-    $pendingReboot = Get-WURebootStatus -Silent
-    if ($pendingReboot) {
-        Write-Log "AVISO: Sistema requer reinicialização para completar as atualizações"
-    }
-
-    Write-Log "=== Processo de atualização concluído ==="
-    Write-Log "Log completo disponível em: $LogPath"
+    Write-Log "=== Processo de atualizacao finalizado com sucesso ==="
+    Write-Log ("Log completo disponivel em: {0}" -f $LogPath)
 }
 catch {
-    Write-Log "ERRO: $($_.Exception.Message)"
-    Write-Log "Stack Trace: $($_.ScriptStackTrace)"
-    exit 1
+    Write-Log ("ERRO GERAL: {0}" -f $_.Exception.Message)
+    if ($_.Exception.InnerException) {
+        Write-Log ("InnerException: {0}" -f $_.Exception.InnerException.Message)
+    }
+    Write-Log ("Stack Trace: {0}" -f $_.ScriptStackTrace)
+    Exit 1
 }

@@ -1,217 +1,149 @@
-#Requires -RunAsAdministrator
-#Requires -Version 5.1
-<#
-.SYNOPSIS
-  Script abrangente para reparo e atualizacao do Windows,
-  compativel com Windows 10 e 11 (Home, Pro, Business, Enterprise).
+# Script PowerShell Avançado para Solução de Problemas do Windows Update
+# Compatível com Windows 10/11 e Microsoft Intune
 
-.DESCRIPTION
-  1. Repara servicos do Windows Update (checando e habilitando).
-  2. Limpa cache e componentes corrompidos.
-  3. Instala modulos necessarios (NuGet, PSWindowsUpdate).
-  4. Aplica atualizacoes de seguranca, criticas, drivers, opcionais etc.
-  5. Gera logs detalhados, sem forcar reboot.
-
-.NOTES
-  Autor: Sergio
-#>
-
-# -- Configuracao de logs --------------------------------------
-
-$TimeStamp = (Get-Date -Format 'yyyyMMdd_HHmmss')
-$LogPath   = "$env:TEMP\WindowsUpdate_$TimeStamp.log"
-
-function Write-Log {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$Message
-    )
-
-    $logEntry = "[{0:yyyy-MM-dd HH:mm:ss}] {1}" -f (Get-Date), $Message
-    Add-Content -Path $LogPath -Value $logEntry
-    Write-Host $logEntry
-}
-
-# -- Funcao para verificar e ativar servicos essenciais --------
-
-function Enable-RequiredServices {
-    Write-Log "Verificando e ativando servicos criticos de Windows Update..."
-
-    # Lista de servicos que podem impactar o Windows Update
-    $serviceList = @(
-        'wuauserv',  # Windows Update
-        'bits',      # Background Intelligent Transfer Service
-        'cryptsvc',  # Cryptographic Services
-        'msiserver'  # Windows Installer
-    )
-
-    foreach ($svc in $serviceList) {
-        try {
-            $service = Get-Service -Name $svc -ErrorAction Stop
-            
-            if ($service.StartType -eq 'Disabled') {
-                Write-Log ("Servico {0} esta 'Disabled'. Definindo para 'Manual'..." -f $svc)
-                Set-Service -Name $svc -StartupType Manual -ErrorAction Stop
-            }
-
-            if ($service.Status -ne 'Running') {
-                Write-Log ("Iniciando servico {0}..." -f $svc)
-                Start-Service -Name $svc -ErrorAction Stop
-            }
-            Write-Log ("Servico {0} OK" -f $svc)
-        }
-        catch {
-            Write-Log ("ERRO ao configurar servico {0}: {1}" -f $svc, $_.Exception.Message)
-        }
+# Função para verificar permissões administrativas
+function Check-Admin {
+    if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+        Write-Host "Este script precisa ser executado como administrador!" -ForegroundColor Red
+        exit 1
     }
 }
 
-# -- Funcao para reparo do Windows Update ----------------------
-
-function Repair-WindowsUpdate {
-    Write-Log "===== Iniciando reparo do Windows Update ====="
-
-    # Passo 1: Verificar e habilitar servicos
-    Enable-RequiredServices
-
-    # Passo 2: Parar servicos de atualizacao
-    $services = @('wuauserv', 'bits', 'cryptsvc', 'msiserver')
+# Função para redefinir os componentes do Windows Update
+function Reset-WindowsUpdateComponents {
+    Write-Host "Redefinindo componentes do Windows Update..." -ForegroundColor Yellow
+    
+    # Parar serviços relacionados ao Windows Update
+    $services = @("wuauserv", "cryptSvc", "bits", "msiserver")
     foreach ($service in $services) {
         try {
-            $currentStatus = (Get-Service -Name $service -ErrorAction SilentlyContinue).Status
-            if ($currentStatus -eq 'Running') {
-                Stop-Service -Name $service -Force -ErrorAction Stop
-                Write-Log ("Servico {0} parado." -f $service)
+            Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 5 # Aguarda 5 segundos antes de continuar
+        } catch {
+            Write-Host "Falha ao parar o serviço $service." -ForegroundColor Red
+        }
+    }
+
+    # Renomear pastas de cache do Windows Update
+    $paths = @("C:\Windows\SoftwareDistribution", "C:\Windows\System32\catroot2")
+    foreach ($path in $paths) {
+        if (Test-Path $path) {
+            try {
+                Rename-Item -Path $path -NewName "$($path).old" -ErrorAction SilentlyContinue
+                Write-Host "Renomeado: $path" -ForegroundColor Green
+            } catch {
+                Write-Host "Falha ao renomear: $path" -ForegroundColor Red
             }
         }
-        catch {
-            Write-Log ("ERRO ao parar {0}: {1}" -f $service, $_.Exception.Message)
-        }
     }
 
-    # Passo 3: Limpar cache do Windows Update
-    Write-Log "Limpando cache do Windows Update..."
-    try {
-        Remove-Item "$env:SystemRoot\SoftwareDistribution\*" -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item "$env:SystemRoot\System32\catroot2\*" -Recurse -Force -ErrorAction SilentlyContinue
-        Write-Log "Cache do Windows Update limpo."
-    }
-    catch {
-        Write-Log ("ERRO ao limpar cache do Windows Update: {0}" -f $_.Exception.Message)
-    }
-
-    # Passo 4: Reparar componentes do sistema
-    Write-Log "Executando DISM e SFC..."
-    try {
-        Start-Process "DISM.exe" -ArgumentList "/Online /Cleanup-Image /RestoreHealth" -Wait -NoNewWindow -ErrorAction Stop
-        Start-Process "sfc.exe" -ArgumentList "/scannow" -Wait -NoNewWindow -ErrorAction Stop
-        Write-Log "DISM e SFC concluidos."
-    }
-    catch {
-        Write-Log ("ERRO ao executar DISM/SFC: {0}" -f $_.Exception.Message)
-    }
-
-    # Passo 5: Reiniciar servicos
+    # Reiniciar serviços relacionados ao Windows Update
     foreach ($service in $services) {
         try {
-            Start-Service -Name $service -ErrorAction Stop
-            Write-Log ("Servico {0} reiniciado." -f $service)
-        }
-        catch {
-            Write-Log ("ERRO ao reiniciar {0}: {1}" -f $service, $_.Exception.Message)
+            Start-Service -Name $service -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 5 # Aguarda 5 segundos antes de continuar
+        } catch {
+            Write-Host "Falha ao iniciar o serviço $service." -ForegroundColor Red
         }
     }
 
-    Write-Log "===== Reparo do Windows Update concluido ====="
+    Write-Host "Componentes do Windows Update redefinidos com sucesso!" -ForegroundColor Green
 }
 
-# -- Funcao para instalar atualizacoes via PSWindowsUpdate -----
-
-function Install-WindowsUpdates {
-    Write-Log "===== Iniciando instalacao de atualizacoes ====="
-
-    # Ajustar protocolo TLS
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-    # Ajustar politica de execucao (escopo de processo)
-    Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
-    Write-Log "Politica de execucao definida para Bypass (escopo de processo)."
-
-    # Instalar pacotes e modulos necessarios
-    Write-Log "Instalando modulos e providers (NuGet, PSWindowsUpdate)..."
+# Função para executar o comando DISM para reparar a imagem do sistema
+function Repair-WindowsImage {
+    Write-Host "Executando DISM para reparar a imagem do sistema..." -ForegroundColor Yellow
+    
     try {
-        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -ErrorAction Stop | Out-Null
-        Set-PSRepository -Name "PSGallery" -InstallationPolicy Trusted -ErrorAction Stop
-        Install-Module PSWindowsUpdate -Force -AllowClobber -ErrorAction Stop | Out-Null
-        Import-Module PSWindowsUpdate -Force -ErrorAction Stop
-        Write-Log "Modulo PSWindowsUpdate instalado/importado com sucesso."
+        DISM /Online /Cleanup-Image /RestoreHealth | Out-Null
+        
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Reparo da imagem do sistema concluído com sucesso!" -ForegroundColor Green
+        } else {
+            Write-Host "Falha ao reparar a imagem do sistema." -ForegroundColor Red
+        }
+    } catch {
+        Write-Host "Erro ao executar DISM: $_" -ForegroundColor Red
     }
-    catch {
-        Write-Log ("ERRO ao instalar PSWindowsUpdate ou NuGet: {0}" -f $_.Exception.Message)
-        return
+}
+
+# Função para verificar e corrigir arquivos corrompidos usando o SFC (System File Checker)
+function Run-SFC {
+    Write-Host "Executando verificação de integridade dos arquivos do sistema (SFC)..." -ForegroundColor Yellow
+    
+    try {
+        sfc /scannow | Out-Null
+        
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Verificação SFC concluída sem erros!" -ForegroundColor Green
+        } else {
+            Write-Host "Falha ao corrigir alguns arquivos do sistema." -ForegroundColor Red
+        }
+    } catch {
+        Write-Host "Erro ao executar SFC: $_" -ForegroundColor Red
     }
+}
 
-    # Criterios de atualizacao
-    $updateCriteria = @{
-        AcceptAll   = $true
-        IgnoreReboot= $true
-        NotCategory = "Definition Updates"
-        Install     = $true
-    }
-
-    # Lista de categorias de atualizacao
-    $categories = @(
-        "Security Updates",
-        "Critical Updates",
-        "Feature Packs",
-        "Microsoft",
-        "Drivers",
-        "Optional Updates"
-    )
-
-    foreach ($cat in $categories) {
-        Write-Log ("Buscando atualizacoes da categoria: {0}" -f $cat)
+# Função para instalar atualizações pendentes usando PSWindowsUpdate
+function Install-PendingUpdates {
+    Write-Host "Verificando e instalando atualizações pendentes..." -ForegroundColor Yellow
+    
+    # Instalar o módulo PSWindowsUpdate caso não esteja presente
+    if (-not (Get-Module -ListAvailable PSWindowsUpdate)) {
         try {
-            Get-WindowsUpdate -Category $cat @updateCriteria -ErrorAction Stop
-        }
-        catch {
-            Write-Log ("ERRO ao buscar/instalar updates na categoria {0}: {1}" -f $cat, $_.Exception.Message)
+            Install-PackageProvider -Name NuGet -Force | Out-Null
+            Install-Module PSWindowsUpdate -Force | Out-Null
+            Import-Module PSWindowsUpdate | Out-Null
+        } catch {
+            Write-Host "Erro ao instalar o módulo PSWindowsUpdate: $_" -ForegroundColor Red
+            return
         }
     }
 
-    Write-Log "===== Instalacao de atualizacoes concluida ====="
+    Import-Module PSWindowsUpdate
 
-    # Verificar se ha reboot pendente (sem forcar)
     try {
-        $rebootStatus = Get-WURebootStatus -Silent
-        if ($rebootStatus) {
-            Write-Log "AVISO: Ha uma reinicializacao pendente para concluir as atualizacoes. O usuario decide quando reiniciar."
-        }
-    }
-    catch {
-        Write-Log ("ERRO ao verificar status de reboot: {0}" -f $_.Exception.Message)
+        # Listar atualizações pendentes e instalá-las automaticamente sem reiniciar o sistema.
+        Get-WindowsUpdate | Where-Object {$_.IsInstalled -eq $false} | Install-WindowsUpdate –AcceptAll –IgnoreReboot –Verbose | Out-Null
+
+        Write-Host "Todas as atualizações disponíveis foram instaladas com sucesso!" -ForegroundColor Green
+
+    } catch {
+        Write-Host "Erro ao instalar atualizações pendentes: $_" -ForegroundColor Red
     }
 }
 
-# -- Bloco principal (try/catch geral) --------------------------
+# Função para atualizar para a última versão do Windows (Atualização de Recursos)
+function Upgrade-ToLatestVersion {
+    Write-Host "Atualizando para a última versão do Windows..." -ForegroundColor Yellow
 
-try {
-    Write-Log "=== Iniciando processo completo de atualizacao do Windows ==="
+    try {
+        # Usar Assistente de Atualização ou comandos específicos via DISM/WSUS se aplicável.
+        Start-Process "$env:SystemRoot\System32\wuauclt.exe" "/updatenow" –Wait –NoNewWindow | Out-Null
 
-    # 1. Reparar Windows Update
-    Repair-WindowsUpdate
+        Write-Host "Atualização de recurso iniciada. Acompanhe pelo Windows Update." -ForegroundColor Green
 
-    # 2. Instalar atualizacoes (sem forcar reboot)
-    Install-WindowsUpdates
-
-    Write-Log "=== Processo de atualizacao finalizado com sucesso ==="
-    Write-Log ("Log completo disponivel em: {0}" -f $LogPath)
-}
-catch {
-    Write-Log ("ERRO GERAL: {0}" -f $_.Exception.Message)
-    if ($_.Exception.InnerException) {
-        Write-Log ("InnerException: {0}" -f $_.Exception.InnerException.Message)
+    } catch {
+        Write-Host "Erro ao iniciar a atualização de recurso: $_" -ForegroundColor Red
     }
-    Write-Log ("Stack Trace: {0}" -f $_.ScriptStackTrace)
-    Exit 1
 }
+
+# Função principal para executar todas as etapas de correção e atualização automática do sistema operacional.
+function Main {
+    Check-Admin # Verificar permissões administrativas
+    
+    Reset-WindowsUpdateComponents # Redefinir componentes do Windows Update
+    
+    Repair-WindowsImage # Reparar a imagem do sistema
+    
+    Run-SFC # Verificar e corrigir arquivos corrompidos
+    
+    Install-PendingUpdates # Instalar todas as atualizações pendentes
+    
+    Upgrade-ToLatestVersion # Atualizar para a última versão do Windows
+    
+    Write-Host "Todas as correções e atualizações foram aplicadas. Reinicie o computador manualmente, se necessário." -ForegroundColor Magenta
+}
+
+# Executar a função principal automaticamente.
+Main

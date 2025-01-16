@@ -22,7 +22,7 @@ $ReleaseVersion = "24H2"       # Pode ser "23H2", "24H2" etc.
 $ProductVersion = "Windows 11" # Pode ser "Windows 10" ou "Windows 11"
 
 # 1. Configurar a politica de execucao (nao substitui GPO, apenas local)
-Set-ExecutionPolicy RemoteSigned -Force -Confirm:$false
+Set-ExecutionPolicy Bypass -Scope CurrentUser -Force
 
 # 2. Instalar o PackageProvider (NuGet) silenciosamente
 Write-Output "Instalando o PackageProvider NuGet..."

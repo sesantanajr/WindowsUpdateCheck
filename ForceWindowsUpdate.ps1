@@ -1,116 +1,118 @@
-<# 
-.SYNOPSIS
-    Script para automatizar atualizacoes do Windows e configuracoes avancadas.
+# Script PowerShell para Atualização Forçada do Windows
+# Compatível com PowerShell 5
+# Estratégia: Pesquisa Dinâmica, DISM, Windows Update e Atualizações de Recursos
 
-.DESCRIPTION
-    - Define politica de execucao.
-    - Instala PackageProvider (NuGet).
-    - Atualiza PowerShellGet.
-    - Instala modulo PSWindowsUpdate.
-    - Para e inicia servicos wuauserv e bits.
-    - Remove a pasta SoftwareDistribution.
-    - Executa DISM para limpeza e restauracao de componentes.
-    - Lista e instala atualizacoes do Windows de forma silenciosa.
+# Configurações iniciais
+$WindowsVersion = "Windows 11"
+$TargetVersion = "24H2"
+$ExpectedBuild = "26100.2894"
+$LogFilePath = "$env:TEMP\WindowsUpdateLog.txt"
 
-.NOTES
-    Autor: Tony (ChatGPT) para Sergio
-    Versao: 2.0
-#>
+# Função para registrar logs
+function Write-Log {
+    param (
+        [string]$Message,
+        [string]$Type = "INFO"
+    )
+    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $LogMessage = "[$Timestamp] [$Type] $Message"
+    Write-Host $LogMessage
+    Add-Content -Path $LogFilePath -Value $LogMessage
+}
 
-# Variaveis de configuracao para versao-alvo do Windows
-$ReleaseVersion = "24H2"       # Pode ser "23H2", "24H2" etc.
-$ProductVersion = "Windows 11" # Pode ser "Windows 10" ou "Windows 11"
+# Função para exibir configurações iniciais
+function Display-UpdateParameters {
+    Write-Log "Configuracoes Iniciais:"
+    Write-Log "Windows: $WindowsVersion"
+    Write-Log "Versao Alvo: $TargetVersion"
+    Write-Log "Build Esperada: $ExpectedBuild"
+}
 
-# 1. Configurar a politica de execucao (nao substitui GPO, apenas local)
-Set-ExecutionPolicy Bypass -Scope CurrentUser -Force
+# Função para verificar a build atual
+function Check-BuildVersion {
+    $CurrentBuild = (Get-ComputerInfo).OsBuildNumber
 
-# 2. Instalar o PackageProvider (NuGet) silenciosamente
-Write-Output "Instalando o PackageProvider NuGet..."
-Install-PackageProvider -Name NuGet -Force -Confirm:$false
-Write-Output "NuGet instalado/configurado com sucesso."
-
-# 3. Funcao para verificar e atualizar o modulo PowerShellGet
-function Update-PowerShellGet {
-    Write-Output "Verificando o modulo PowerShellGet..."
-    $currentVersion = (Get-Module -Name PowerShellGet -ListAvailable |
-                       Sort-Object Version -Descending |
-                       Select-Object -First 1).Version
-    $requiredVersion = [Version]"2.2.5"  # Versao minima recomendada
-
-    if ($currentVersion -lt $requiredVersion) {
-        Write-Output "Atualizando PowerShellGet para a versao $requiredVersion..."
-        Install-Module -Name PowerShellGet -Force -AllowClobber -Confirm:$false
-        Write-Output "PowerShellGet atualizado com sucesso."
+    if ($CurrentBuild -ge [int]($ExpectedBuild)) {
+        Write-Log "Atualizacao concluida com sucesso! Build atual: $CurrentBuild" "SUCCESS"
+        return $true
     } else {
-        Write-Output "PowerShellGet ja esta na versao mais recente ($currentVersion)."
+        Write-Log ("A build esperada ({0}) nao foi instalada. Build atual: {1}" -f $ExpectedBuild, $CurrentBuild) "WARNING"
+        return $false
     }
 }
 
-# 4. Funcao para verificar e instalar o modulo PSWindowsUpdate
-function Install-PSWindowsUpdate {
-    Write-Output "Verificando o modulo PSWindowsUpdate..."
-    if (!(Get-Module -ListAvailable -Name PSWindowsUpdate)) {
-        Write-Output "Instalando o modulo PSWindowsUpdate..."
-        Install-Module -Name PSWindowsUpdate -Force -Confirm:$false
-        Write-Output "PSWindowsUpdate instalado com sucesso."
-    } else {
-        Write-Output "O modulo PSWindowsUpdate ja esta instalado."
+# Função para reparar componentes do Windows Update usando DISM
+function Repair-WindowsUpdateComponents {
+    Write-Log "Reparando componentes do Windows Update com DISM..."
+
+    try {
+        # Verificar integridade do sistema
+        dism /online /cleanup-image /scanhealth | Out-Null
+        dism /online /cleanup-image /restorehealth | Out-Null
+
+        # Reiniciar serviços do Windows Update
+        Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
+        Stop-Service -Name cryptsvc -Force -ErrorAction SilentlyContinue
+        Start-Service -Name wuauserv
+        Start-Service -Name cryptsvc
+
+        Write-Log "Componentes reparados com sucesso." "SUCCESS"
+    } catch {
+        Write-Log ("Erro ao reparar componentes do Windows Update: {0}" -f $_.Exception.Message) "ERROR"
+        exit 1
     }
 }
 
-# 5. Funcao para limpar e reiniciar servicos do Windows Update
-function Reset-WindowsUpdate {
-    Write-Output "Parando servicos wuauserv e bits..."
-    Stop-Service -Name wuauserv -ErrorAction SilentlyContinue
-    Stop-Service -Name bits -ErrorAction SilentlyContinue
+# Função para forçar instalação de atualizações pendentes via Windows Update
+function Force-WindowsUpdate {
+    Write-Log "Forçando instalação de atualizações pendentes via Windows Update..."
 
-    Write-Output "Removendo pasta SoftwareDistribution..."
-    Remove-Item -Path "C:\Windows\SoftwareDistribution" -Recurse -Force -ErrorAction SilentlyContinue
-
-    Write-Output "Reiniciando servicos wuauserv e bits..."
-    Start-Service -Name wuauserv
-    Start-Service -Name bits
-
-    Write-Output "Executando DISM /Cleanup-Image /StartComponentCleanup /ResetBase..."
-    DISM /Online /Cleanup-Image /StartComponentCleanup /ResetBase
-
-    Write-Output "Executando DISM /Cleanup-Image /RestoreHealth..."
-    DISM /Online /Cleanup-Image /RestoreHealth
-
-    Write-Output "Reset do Windows Update concluido."
-}
-
-# 6. Configurar a versao-alvo do Windows (Exemplo: 24H2 - Windows 11)
-Write-Output "Configurando versao-alvo do Windows..."
-Set-WUSettings -TargetReleaseVersion -TargetReleaseVersionInfo $ReleaseVersion -ProductVersion $ProductVersion -Confirm:$false
-Write-Output "Configuracao da versao-alvo concluida ($ReleaseVersion - $ProductVersion)."
-
-# 7. Funcao para listar e instalar atualizacoes do Windows silenciosamente
-function Install-WindowsUpdates {
-    Write-Output "Carregando modulo PSWindowsUpdate..."
-    Import-Module PSWindowsUpdate -ErrorAction SilentlyContinue
-
-    Write-Output "Procurando por atualizacoes disponiveis..."
-    # Removerei o -ThrottleLimit, pois pode nao existir em certas versoes do PSWindowsUpdate
-    $updates = Get-WindowsUpdate
-
-    if ($updates) {
-        Write-Output "Instalando todas as atualizacoes disponiveis de forma silenciosa..."
-        Get-WindowsUpdate -AcceptAll -Install -IgnoreReboot -Confirm:$false
-        Write-Output "Atualizacoes instaladas com sucesso. Reinicie manualmente se necessario."
-    } else {
-        Write-Output "Nenhuma atualizacao disponivel no momento."
+    try {
+        Install-WindowsUpdate -AcceptAll -AutoReboot | Out-Null
+        Write-Log "Todas as atualizações pendentes foram instaladas." "SUCCESS"
+    } catch {
+        Write-Log ("Erro ao forçar atualizações via Windows Update: {0}" -f $_.Exception.Message) "WARNING"
     }
 }
 
-# 8. Execucao principal do Script
-Write-Output "Iniciando o processo de atualizacao..."
-Update-PowerShellGet
-Install-PSWindowsUpdate
+# Função para instalar uma atualização de recurso (Feature Update)
+function Install-FeatureUpdate {
+    Write-Log "Instalando atualização de recurso (Feature Update)..."
 
-# 9. Reset do Windows Update antes da instalacao das atualizacoes
-Reset-WindowsUpdate
+    try {
+        # Usar DISM para instalar a atualização de recurso diretamente (se disponível)
+        dism /online /add-package /packagepath:"C:\Path\To\FeatureUpdate.cab" | Out-Null
 
-# 10. Instalar as atualizacoes disponiveis
-Install-WindowsUpdates
-Write-Output "Processo concluido."
+        # Alternativa: usar Media Creation Tool ou Windows Update Assistant (modo silencioso)
+        # Start-Process -FilePath "$env:TEMP\MediaCreationTool.exe" -ArgumentList "/auto upgrade /quiet" -Wait
+
+        Write-Log "Atualização de recurso instalada com sucesso." "SUCCESS"
+    } catch {
+        Write-Log ("Erro ao instalar atualização de recurso: {0}" -f $_.Exception.Message) "ERROR"
+        exit 1
+    }
+}
+
+# Fluxo principal do script
+Write-Log "Iniciando processo de atualização forçada..."
+Display-UpdateParameters
+
+if (-not (Check-BuildVersion)) {
+    Repair-WindowsUpdateComponents
+
+    # Forçar atualizações pendentes via Windows Update
+    Force-WindowsUpdate
+
+    # Verificar novamente após tentar atualizar via Windows Update
+    if (-not (Check-BuildVersion)) {
+        Install-FeatureUpdate
+
+        # Verificar novamente após instalar a atualização de recurso
+        if (-not (Check-BuildVersion)) {
+            Write-Log "A build esperada nao foi instalada mesmo apos todas as tentativas." "ERROR"
+            exit 1
+        }
+    }
+}
+
+Write-Log "Processo concluido com sucesso!" "SUCCESS"

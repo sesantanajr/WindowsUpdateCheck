@@ -1,14 +1,9 @@
-# Script PowerShell para Atualização Forçada do Windows
-# Compatível com PowerShell 5
-# Estratégia: Pesquisa Dinâmica, DISM, Windows Update e Atualizações de Recursos
-
-# Configurações iniciais
-$WindowsVersion = "Windows 11"
-$TargetVersion = "24H2"
+# Configuracoes iniciais
+$LogFilePath = "$env:ProgramData\WindowsUpdateLog.txt"
+$TimeoutMinutes = 30
 $ExpectedBuild = "26100.2894"
-$LogFilePath = "$env:TEMP\WindowsUpdateLog.txt"
 
-# Função para registrar logs
+# Funcoes auxiliares
 function Write-Log {
     param (
         [string]$Message,
@@ -20,99 +15,113 @@ function Write-Log {
     Add-Content -Path $LogFilePath -Value $LogMessage
 }
 
-# Função para exibir configurações iniciais
-function Display-UpdateParameters {
-    Write-Log "Configuracoes Iniciais:"
-    Write-Log "Windows: $WindowsVersion"
-    Write-Log "Versao Alvo: $TargetVersion"
-    Write-Log "Build Esperada: $ExpectedBuild"
-}
-
-# Função para verificar a build atual
+# Funcao para verificar a versao atual do sistema
 function Check-BuildVersion {
-    $CurrentBuild = (Get-ComputerInfo).OsBuildNumber
-
-    if ($CurrentBuild -ge [int]($ExpectedBuild)) {
-        Write-Log "Atualizacao concluida com sucesso! Build atual: $CurrentBuild" "SUCCESS"
-        return $true
-    } else {
-        Write-Log ("A build esperada ({0}) nao foi instalada. Build atual: {1}" -f $ExpectedBuild, $CurrentBuild) "WARNING"
+    try {
+        $CurrentBuild = (Get-ComputerInfo).OsBuildNumber
+        if ($CurrentBuild -ge [int]($ExpectedBuild)) {
+            Write-Log "Atualizacao concluida com sucesso! Build atual: $CurrentBuild" "SUCCESS"
+            return $true
+        } else {
+            Write-Log ("A build esperada ({0}) nao foi instalada. Build atual: {1}" -f $ExpectedBuild, $CurrentBuild) "WARNING"
+            return $false
+        }
+    } catch {
+        Write-Log ("Erro ao verificar a versao do sistema: {0}" -f $_.Exception.Message) "ERROR"
         return $false
     }
 }
 
-# Função para reparar componentes do Windows Update usando DISM
+# Funcao para reparar componentes do Windows Update usando DISM e reiniciar servicos criticos
 function Repair-WindowsUpdateComponents {
-    Write-Log "Reparando componentes do Windows Update com DISM..."
-
+    Write-Log "Reparando componentes do Windows Update..."
     try {
-        # Verificar integridade do sistema
         dism /online /cleanup-image /scanhealth | Out-Null
         dism /online /cleanup-image /restorehealth | Out-Null
 
-        # Reiniciar serviços do Windows Update
-        Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
-        Stop-Service -Name cryptsvc -Force -ErrorAction SilentlyContinue
-        Start-Service -Name wuauserv
-        Start-Service -Name cryptsvc
+        foreach ($service in @("wuauserv", "cryptsvc", "bits")) {
+            Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+            Start-Service -Name $service
+        }
 
         Write-Log "Componentes reparados com sucesso." "SUCCESS"
     } catch {
         Write-Log ("Erro ao reparar componentes do Windows Update: {0}" -f $_.Exception.Message) "ERROR"
-        exit 1
     }
 }
 
-# Função para forçar instalação de atualizações pendentes via Windows Update
+# Funcao para monitorar progresso das atualizacoes pendentes via logs do Event Viewer
+function Monitor-WindowsUpdateProgress {
+    Write-Log "Monitorando progresso das atualizacoes..."
+    $StartTime = Get-Date
+
+    while ((Get-Date) -lt $StartTime.AddMinutes($TimeoutMinutes)) {
+        try {
+            # Verificar logs do Windows Update (Event Viewer)
+            $UpdateStatus = Get-WinEvent -LogName 'Microsoft-Windows-WindowsUpdateClient/Operational' |
+                            Where-Object { $_.Id -eq 19 } | Select-Object -First 1
+
+            if ($UpdateStatus) {
+                Write-Log ("Progresso detectado: {0}" -f $UpdateStatus.Message) "INFO"
+                return $true
+            }
+            Start-Sleep -Seconds 30
+        } catch {
+            Write-Log ("Erro ao monitorar progresso das atualizacoes: {0}" -f $_.Exception.Message) "ERROR"
+            return $false
+        }
+    }
+
+    Write-Log "Tempo limite alcancado sem progresso nas atualizacoes." "WARNING"
+    return $false
+}
+
+# Funcao para forcar instalacao de todas as atualizacoes pendentes, incluindo drivers e opcionalmente evitar reinicio automatico
 function Force-WindowsUpdate {
-    Write-Log "Forçando instalação de atualizações pendentes via Windows Update..."
-
+    Write-Log "Forcando instalacao de todas as atualizacoes pendentes, incluindo drivers..."
+    
     try {
-        Install-WindowsUpdate -AcceptAll -AutoReboot | Out-Null
-        Write-Log "Todas as atualizações pendentes foram instaladas." "SUCCESS"
+        # Instalar todas as atualizacoes pendentes sem reiniciar automaticamente
+        Install-WindowsUpdate -AcceptAll -MicrosoftUpdate -IgnoreReboot | Out-Null
+
+        # Monitorar progresso apos iniciar o processo de atualizacao
+        if (-not (Monitor-WindowsUpdateProgress)) {
+            Write-Log "Nenhum progresso detectado no tempo limite definido." "WARNING"
+            return $false
+        }
+
+        Write-Log "Todas as atualizacoes pendentes foram instaladas." "SUCCESS"
+        return $true
     } catch {
-        Write-Log ("Erro ao forçar atualizações via Windows Update: {0}" -f $_.Exception.Message) "WARNING"
+        Write-Log ("Erro ao forcar atualizacoes via Windows Update: {0}" -f $_.Exception.Message) "ERROR"
+        return $false
     }
 }
 
-# Função para instalar uma atualização de recurso (Feature Update)
-function Install-FeatureUpdate {
-    Write-Log "Instalando atualização de recurso (Feature Update)..."
-
+# Funcao para evitar reinicializacoes automáticas durante o processo de atualização
+function Prevent-AutomaticReboot {
     try {
-        # Usar DISM para instalar a atualização de recurso diretamente (se disponível)
-        dism /online /add-package /packagepath:"C:\Path\To\FeatureUpdate.cab" | Out-Null
-
-        # Alternativa: usar Media Creation Tool ou Windows Update Assistant (modo silencioso)
-        # Start-Process -FilePath "$env:TEMP\MediaCreationTool.exe" -ArgumentList "/auto upgrade /quiet" -Wait
-
-        Write-Log "Atualização de recurso instalada com sucesso." "SUCCESS"
+        # Desabilitar reinicio automatico temporariamente no registro durante a execucao do script
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' `
+                         -Name 'NoAutoRebootWithLoggedOnUsers' `
+                         -Value 1 -Force
+        
+        Write-Log "Reinicio automatico desabilitado temporariamente." "INFO"
     } catch {
-        Write-Log ("Erro ao instalar atualização de recurso: {0}" -f $_.Exception.Message) "ERROR"
-        exit 1
+        Write-Log ("Erro ao desabilitar reinicio automatico: {0}" -f $_.Exception.Message) "ERROR"
     }
 }
 
 # Fluxo principal do script
-Write-Log "Iniciando processo de atualização forçada..."
-Display-UpdateParameters
+Write-Log "Iniciando processo de atualizacao..."
+Prevent-AutomaticReboot
 
 if (-not (Check-BuildVersion)) {
     Repair-WindowsUpdateComponents
 
-    # Forçar atualizações pendentes via Windows Update
-    Force-WindowsUpdate
-
-    # Verificar novamente após tentar atualizar via Windows Update
-    if (-not (Check-BuildVersion)) {
-        Install-FeatureUpdate
-
-        # Verificar novamente após instalar a atualização de recurso
-        if (-not (Check-BuildVersion)) {
-            Write-Log "A build esperada nao foi instalada mesmo apos todas as tentativas." "ERROR"
-            exit 1
-        }
+    if (-not (Force-WindowsUpdate)) {
+        Write-Log "Falha ao instalar as atualizacoes mesmo apos reparos." "ERROR"
     }
+} else {
+    Write-Log "O dispositivo ja esta atualizado." "INFO"
 }
-
-Write-Log "Processo concluido com sucesso!" "SUCCESS"

@@ -4,6 +4,7 @@
     instalar/habilitar NetFx3 e NetFx4, remover chaves de pausa,
     limpar/renomear SoftwareDistribution/catroot2,
     rodar DISM/SFC, e instalar atualizacoes (Software/Driver).
+
 .DESCRIPTION
     1) Mata processos (tiworker, TrustedInstaller) que possam segurar as pastas.
     2) Tenta renomear SoftwareDistribution e catroot2 (5 tentativas).
@@ -11,6 +12,7 @@
     4) Executa Troubleshooter, DISM e SFC (opcional).
     5) Remove chaves de pausa do Registro.
     6) Instala atualizacoes de software e driver separadamente.
+
 .NOTES
     Autor: Tony (by ChatGPT)
     Data: 24/01/2025
@@ -67,7 +69,6 @@ Function Ensure-NetFeature {
             $featureInfo = Get-WindowsOptionalFeature -Online -FeatureName $feature -ErrorAction SilentlyContinue
             if ($featureInfo -and $featureInfo.State -eq 'Disabled') {
                 Write-Output "Habilitando $($feature)..."
-                # Tenta habilitar sem prompt manual
                 Enable-WindowsOptionalFeature -Online -FeatureName $feature -All -NoRestart | Out-Null
             }
             else {
@@ -84,7 +85,7 @@ Write-Output "Verificando e habilitando NetFx3 e NetFx4-AdvSrvs se necessario...
 Ensure-NetFeature -Features @("NetFx3","NetFx4-AdvSrvs")
 
 # ===================================================
-#  2) Parar servicos e matar processos que bloqueiam
+#  2) Parar servicos e matar processos do Windows Update
 # ===================================================
 Write-Output "Parando servicos e matando processos do Windows Update..."
 
@@ -96,7 +97,8 @@ foreach ($svc in $servicesToStop) {
             Write-Output "Parando servico: $($svc)"
             Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
         }
-    } catch {
+    }
+    catch {
         Write-Output "Falha ao parar servico $($svc): $($Error[0])"
     }
 }
